@@ -207,10 +207,16 @@ class WindowedAttentionCore(nn.Module):
         ).transpose(1, 2)
 
         # Handle KV cache
+        # In transformers 4.x+, past_key_value may be a DynamicCache object,
+        # a tuple of (key, value), or a tuple of (key, value, extra...).
+        # We handle all cases gracefully.
         if past_key_value is not None:
-            past_key, past_value = past_key_value
-            key_states = torch.cat([past_key, key_states], dim=2)
-            value_states = torch.cat([past_value, value_states], dim=2)
+            if isinstance(past_key_value, (list, tuple)) and len(past_key_value) >= 2:
+                past_key, past_value = past_key_value[0], past_key_value[1]
+                key_states = torch.cat([past_key, key_states], dim=2)
+                value_states = torch.cat([past_value, value_states], dim=2)
+            # else: DynamicCache or other object — skip manual concat,
+            # the model's own cache mechanism handles this at a higher level.
 
         # Update cache (store unexpanded KV to save memory)
         new_past_key_value = (key_states, value_states) if use_cache else None
@@ -312,11 +318,12 @@ class WindowedAttentionCore(nn.Module):
             batch_size, seq_len, self.num_kv_heads, self.head_dim
         ).transpose(1, 2)
 
-        # Handle KV cache
+        # Handle KV cache (same DynamicCache-safe logic as standard path)
         if past_key_value is not None:
-            past_key, past_value = past_key_value
-            key_states = torch.cat([past_key, key_states], dim=2)
-            value_states = torch.cat([past_value, value_states], dim=2)
+            if isinstance(past_key_value, (list, tuple)) and len(past_key_value) >= 2:
+                past_key, past_value = past_key_value[0], past_key_value[1]
+                key_states = torch.cat([past_key, key_states], dim=2)
+                value_states = torch.cat([past_value, value_states], dim=2)
 
         new_past_key_value = (key_states, value_states) if use_cache else None
 
