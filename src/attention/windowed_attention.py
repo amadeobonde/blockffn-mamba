@@ -207,19 +207,32 @@ class WindowedAttentionCore(nn.Module):
         ).transpose(1, 2)
 
         # Handle KV cache
-        # In transformers 4.x+, past_key_value may be a DynamicCache object,
-        # a tuple of (key, value), or a tuple of (key, value, extra...).
-        # We handle all cases gracefully.
+        # In transformers 4.x+, past_key_value is typically a DynamicCache object.
+        # We MUST call cache.update() for our layer so all layers have entries —
+        # otherwise non-wrapped layers after us crash with IndexError.
         if past_key_value is not None:
-            if isinstance(past_key_value, (list, tuple)) and len(past_key_value) >= 2:
+            if hasattr(past_key_value, 'update'):
+                # DynamicCache: update it with our K/V so the cache stays in sync.
+                # update() both stores and returns the concatenated K/V.
+                layer_idx = getattr(self.original_attention, 'layer_idx', None)
+                if layer_idx is not None:
+                    cache_kwargs = {"cache_position": kwargs.get("cache_position")}
+                    key_states, value_states = past_key_value.update(
+                        key_states, value_states, layer_idx, cache_kwargs
+                    )
+            elif isinstance(past_key_value, (list, tuple)) and len(past_key_value) >= 2:
                 past_key, past_value = past_key_value[0], past_key_value[1]
                 key_states = torch.cat([past_key, key_states], dim=2)
                 value_states = torch.cat([past_value, value_states], dim=2)
-            # else: DynamicCache or other object — skip manual concat,
-            # the model's own cache mechanism handles this at a higher level.
 
-        # Update cache (store unexpanded KV to save memory)
-        new_past_key_value = (key_states, value_states) if use_cache else None
+        # Return the cache object itself (DynamicCache) or a tuple
+        if use_cache:
+            if hasattr(past_key_value, 'update'):
+                new_past_key_value = past_key_value  # DynamicCache manages itself
+            else:
+                new_past_key_value = (key_states, value_states)
+        else:
+            new_past_key_value = None
 
         # Expand KV heads to match Q heads for GQA
         if self.num_kv_groups > 1:
@@ -318,14 +331,27 @@ class WindowedAttentionCore(nn.Module):
             batch_size, seq_len, self.num_kv_heads, self.head_dim
         ).transpose(1, 2)
 
-        # Handle KV cache (same DynamicCache-safe logic as standard path)
+        # Handle KV cache (same DynamicCache logic as standard path)
         if past_key_value is not None:
-            if isinstance(past_key_value, (list, tuple)) and len(past_key_value) >= 2:
+            if hasattr(past_key_value, 'update'):
+                layer_idx = getattr(self.original_attention, 'layer_idx', None)
+                if layer_idx is not None:
+                    cache_kwargs = {"cache_position": kwargs.get("cache_position")}
+                    key_states, value_states = past_key_value.update(
+                        key_states, value_states, layer_idx, cache_kwargs
+                    )
+            elif isinstance(past_key_value, (list, tuple)) and len(past_key_value) >= 2:
                 past_key, past_value = past_key_value[0], past_key_value[1]
                 key_states = torch.cat([past_key, key_states], dim=2)
                 value_states = torch.cat([past_value, value_states], dim=2)
 
-        new_past_key_value = (key_states, value_states) if use_cache else None
+        if use_cache:
+            if hasattr(past_key_value, 'update'):
+                new_past_key_value = past_key_value
+            else:
+                new_past_key_value = (key_states, value_states)
+        else:
+            new_past_key_value = None
 
         # Expand KV heads to match Q heads for GQA
         if self.num_kv_groups > 1:
