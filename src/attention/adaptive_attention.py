@@ -169,35 +169,30 @@ class AdaptiveAttentionLayer(nn.Module):
             device=device,
         )
 
-        # Combine with original mask if provided
+        # =======================================================
+        # Step 5: Combine adaptive mask with original mask
+        # =======================================================
+        # Convert adaptive bool mask to float format matching the model's mask.
+        # Model mask: [batch, 1, seq, seq] float with 0.0 (allowed) / -inf (blocked)
+        # Our mask: [batch, 1, seq, seq] bool with True (allowed) / False (blocked)
+        if isinstance(adaptive_mask, Tensor) and adaptive_mask.dtype == torch.bool:
+            float_mask = torch.zeros(
+                adaptive_mask.shape, dtype=hidden_states.dtype, device=device
+            )
+            float_mask.masked_fill_(~adaptive_mask, torch.finfo(hidden_states.dtype).min)
+            adaptive_mask = float_mask
+
+        # Combine: both use 0/-inf convention, so addition works
         if attention_mask is not None and isinstance(adaptive_mask, Tensor):
-            # Both are tensors, combine them
-            if attention_mask.dtype == torch.bool and adaptive_mask.dtype == torch.bool:
-                adaptive_mask = adaptive_mask & attention_mask
-            else:
-                # Handle mixed dtypes - convert to float
-                if attention_mask.dtype == torch.bool:
-                    attention_mask = torch.zeros_like(
-                        attention_mask, dtype=hidden_states.dtype
-                    ).masked_fill_(~attention_mask, float("-inf"))
-                if adaptive_mask.dtype == torch.bool:
-                    adaptive_mask = torch.zeros_like(
-                        adaptive_mask, dtype=hidden_states.dtype
-                    ).masked_fill_(~adaptive_mask, float("-inf"))
-                adaptive_mask = adaptive_mask + attention_mask
+            adaptive_mask = adaptive_mask + attention_mask
 
         # =======================================================
-        # Step 5: Apply input layernorm if present
+        # Step 6: Delegate to original layer with our mask
         # =======================================================
-        residual = hidden_states
-
-        if hasattr(self.original_layer, "input_layernorm"):
-            hidden_states = self.original_layer.input_layernorm(hidden_states)
-
-        # =======================================================
-        # Step 6: Run attention with adaptive mask
-        # =======================================================
-        attn_outputs = self.attention_core(
+        # Call the ORIGINAL decoder layer's forward. This preserves
+        # RoPE, DynamicCache updates, MiniCPM scaling, layernorms,
+        # MLP, and all model-specific behavior. We only change the mask.
+        outputs = self.original_layer(
             hidden_states=hidden_states,
             attention_mask=adaptive_mask,
             position_ids=position_ids,
@@ -207,37 +202,11 @@ class AdaptiveAttentionLayer(nn.Module):
             **kwargs,
         )
 
-        attn_output = attn_outputs[0]
-        attn_weights = attn_outputs[1] if len(attn_outputs) > 1 else None
-        new_past_key_value = attn_outputs[2] if len(attn_outputs) > 2 else None
-
-        # Residual connection
-        hidden_states = residual + attn_output
-
-        # =======================================================
-        # Step 7: MLP (unchanged from original)
-        # =======================================================
-        residual = hidden_states
-
-        if hasattr(self.original_layer, "post_attention_layernorm"):
-            hidden_states = self.original_layer.post_attention_layernorm(hidden_states)
-
-        if hasattr(self.original_layer, "mlp"):
-            mlp_output = self.original_layer.mlp(hidden_states)
-            hidden_states = residual + mlp_output
-
         # =======================================================
         # Collect statistics if enabled
         # =======================================================
         if self.collect_statistics:
             self._collect_stats(sparsity, window_sizes, seq_len)
-
-        # Return in expected format
-        outputs = (hidden_states,)
-        if output_attentions:
-            outputs += (attn_weights,)
-        if use_cache:
-            outputs += (new_past_key_value,)
 
         return outputs
 
