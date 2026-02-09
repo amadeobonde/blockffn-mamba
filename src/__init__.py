@@ -1,33 +1,33 @@
 """
-BlockFFN + Mamba Hybrid Research Prototype.
+BlockFFN Adaptive Inference Framework
 
-This package provides tools for integrating Mamba2 sidecars with BlockFFN-3B-SFT
-to test whether routing signals can gate between cheap (Mamba) and expensive
-(attention) sequence mixing.
+A single-model inference acceleration framework that exploits BlockFFN's
+intrinsic properties (TLS, CLS, routing sparsity) to dynamically allocate
+compute per token without sacrificing correctness.
+
+Key components:
+- Adaptive Attention: Variable window sizes based on routing sparsity
+- CLS FFN: Chunk-level expert batching and reuse
+- Verification: Confidence-based escalation decisions
+- Engine: Unified orchestrator for all optimizations
 """
 
-from .routing_extractor import RoutingExtractor, RoutingHook
-from .mamba_sidecar import MambaSidecar, GatedHybridLayer, attach_mamba_sidecar
-from .eval_utils import (
-    compute_perplexity,
-    generate_text,
-    MemoryTracker,
-    benchmark_throughput,
+from src.adaptive.config import AdaptiveInferenceConfig, PRESETS
+from src.engine.adaptive_engine import (
+    AdaptiveInferenceEngine,
+    GenerationStats,
+    create_adaptive_engine,
+    print_stats_summary,
 )
 
+__version__ = "0.2.0"
 __all__ = [
-    # Routing extraction
-    "RoutingExtractor",
-    "RoutingHook",
-    # Mamba integration
-    "MambaSidecar",
-    "GatedHybridLayer",
-    "attach_mamba_sidecar",
-    # Evaluation utilities
-    "compute_perplexity",
-    "generate_text",
-    "MemoryTracker",
-    "benchmark_throughput",
+    # Config
+    "AdaptiveInferenceConfig",
+    "PRESETS",
+    # Engine
+    "AdaptiveInferenceEngine",
+    "GenerationStats",
+    "create_adaptive_engine",
+    "print_stats_summary",
 ]
-
-__version__ = "0.1.0"

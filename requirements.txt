@@ -1,36 +1,5 @@
-# BlockFFN + Mamba Hybrid Requirements
-# Install with: pip install -r requirements.txt
-
-# PyTorch (install separately with CUDA support)
-# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-torch>=2.0.0
-
-# HuggingFace ecosystem
-transformers>=4.40.0
-accelerate>=0.25.0
-safetensors>=0.4.0
-
-# Evaluation datasets
-datasets>=2.14.0
-
-# Visualization and utilities
-matplotlib>=3.7.0
-jupyter>=1.0.0
-tqdm>=4.65.0
-pandas>=2.0.0
-
-# Memory optimization (8-bit quantization fallback)
-bitsandbytes>=0.41.0
-
-# Build dependencies for mamba-ssm
-ninja>=1.11.0
-packaging>=23.0
-wheel>=0.40.0
-
-# Mamba dependencies (require CUDA - will fail on Mac)
-# Install separately if available:
-# pip install causal-conv1d>=1.4.0
-# pip install mamba-ssm
-
-# Optional: for notebook widgets
-ipywidgets>=8.0.0
+torch==2.10.0
+transformers==5.1.0
+psutil==7.2.2
+numpy==2.4.2
+tqdm==4.67.3
