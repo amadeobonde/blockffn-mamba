@@ -178,6 +178,26 @@ class AdaptiveAttentionLayer(nn.Module):
         window_sizes = self.window_mapper(sparsity, seq_len)
 
         # =======================================================
+        # No-op shortcut: if all windows >= seq_len, the adaptive
+        # mask equals standard causal. Pass through unchanged to
+        # preserve the model's internal attention path (flash/SDPA)
+        # and avoid numerical divergence from switching code paths.
+        # =======================================================
+        if window_sizes.min().item() >= seq_len:
+            outputs = self.original_layer(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                **kwargs,
+            )
+            if self.collect_statistics:
+                self._collect_stats(sparsity, window_sizes, seq_len)
+            return outputs
+
+        # =======================================================
         # Step 4: Generate adaptive attention mask
         # =======================================================
         adaptive_mask = self.mask_generator.generate_mask(
