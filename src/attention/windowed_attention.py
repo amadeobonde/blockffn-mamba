@@ -29,7 +29,8 @@ class WindowedAttentionCore(nn.Module):
     Attributes:
         original_attention: Reference to original attention module (optional)
         hidden_size: Model hidden size
-        num_heads: Number of attention heads
+        num_heads: Number of Q attention heads
+        num_kv_heads: Number of KV heads (for GQA; equals num_heads for MHA)
         head_dim: Dimension per head
         use_flex_attention: Whether to use FlexAttention backend
     """
@@ -39,6 +40,7 @@ class WindowedAttentionCore(nn.Module):
         original_attention: Optional[nn.Module] = None,
         hidden_size: Optional[int] = None,
         num_heads: Optional[int] = None,
+        num_kv_heads: Optional[int] = None,
         use_flex_attention: bool = False,
     ):
         """
@@ -47,7 +49,8 @@ class WindowedAttentionCore(nn.Module):
         Args:
             original_attention: Original attention module to wrap
             hidden_size: Hidden size (required if no original_attention)
-            num_heads: Number of heads (required if no original_attention)
+            num_heads: Number of Q heads (required if no original_attention)
+            num_kv_heads: Number of KV heads for GQA (defaults to num_heads)
             use_flex_attention: Use FlexAttention if available
         """
         super().__init__()
@@ -62,16 +65,20 @@ class WindowedAttentionCore(nn.Module):
             assert hidden_size is not None and num_heads is not None
             self.hidden_size = hidden_size
             self.num_heads = num_heads
+            self.num_kv_heads = num_kv_heads or num_heads
             self.head_dim = hidden_size // num_heads
+
+        # Number of times to repeat KV heads to match Q heads (GQA)
+        self.num_kv_groups = self.num_heads // self.num_kv_heads
 
         # Check FlexAttention availability
         self._flex_available = self._check_flex_attention()
 
     def _extract_dimensions(self) -> None:
-        """Extract dimensions from original attention module."""
+        """Extract dimensions from original attention module (supports GQA)."""
         attn = self.original_attention
 
-        # Try common attribute names
+        # Try common attribute names for hidden size
         if hasattr(attn, "hidden_size"):
             self.hidden_size = attn.hidden_size
         elif hasattr(attn, "embed_dim"):
@@ -81,12 +88,26 @@ class WindowedAttentionCore(nn.Module):
         else:
             raise ValueError("Cannot determine hidden_size from attention module")
 
+        # Number of Q heads
         if hasattr(attn, "num_heads"):
             self.num_heads = attn.num_heads
         elif hasattr(attn, "num_attention_heads"):
             self.num_heads = attn.num_attention_heads
         else:
             raise ValueError("Cannot determine num_heads from attention module")
+
+        # Number of KV heads (for Grouped Query Attention)
+        # If not present, assume MHA (num_kv_heads == num_heads)
+        if hasattr(attn, "num_key_value_heads"):
+            self.num_kv_heads = attn.num_key_value_heads
+        elif hasattr(attn, "num_kv_heads"):
+            self.num_kv_heads = attn.num_kv_heads
+        elif hasattr(attn, "k_proj"):
+            # Infer from k_proj output features: out_features = num_kv_heads * head_dim
+            head_dim = self.hidden_size // self.num_heads
+            self.num_kv_heads = attn.k_proj.out_features // head_dim
+        else:
+            self.num_kv_heads = self.num_heads
 
         self.head_dim = self.hidden_size // self.num_heads
 
@@ -172,16 +193,17 @@ class WindowedAttentionCore(nn.Module):
                 "Standalone mode requires Q, K, V projections"
             )
 
-        # Reshape for multi-head attention
-        # [batch, seq, hidden] -> [batch, num_heads, seq, head_dim]
+        # Reshape for multi-head attention (supports GQA: num_kv_heads <= num_heads)
+        # Q: [batch, seq, hidden] -> [batch, num_heads, seq, head_dim]
         query_states = query_states.view(
             batch_size, seq_len, self.num_heads, self.head_dim
         ).transpose(1, 2)
+        # K/V: [batch, seq, num_kv_heads * head_dim] -> [batch, num_kv_heads, seq, head_dim]
         key_states = key_states.view(
-            batch_size, seq_len, self.num_heads, self.head_dim
+            batch_size, seq_len, self.num_kv_heads, self.head_dim
         ).transpose(1, 2)
         value_states = value_states.view(
-            batch_size, seq_len, self.num_heads, self.head_dim
+            batch_size, seq_len, self.num_kv_heads, self.head_dim
         ).transpose(1, 2)
 
         # Handle KV cache
@@ -190,8 +212,13 @@ class WindowedAttentionCore(nn.Module):
             key_states = torch.cat([past_key, key_states], dim=2)
             value_states = torch.cat([past_value, value_states], dim=2)
 
-        # Update cache
+        # Update cache (store unexpanded KV to save memory)
         new_past_key_value = (key_states, value_states) if use_cache else None
+
+        # Expand KV heads to match Q heads for GQA
+        if self.num_kv_groups > 1:
+            key_states = key_states.repeat_interleave(self.num_kv_groups, dim=1)
+            value_states = value_states.repeat_interleave(self.num_kv_groups, dim=1)
 
         # Compute attention scores
         # [batch, heads, seq_q, head_dim] @ [batch, heads, head_dim, seq_kv]
@@ -274,15 +301,15 @@ class WindowedAttentionCore(nn.Module):
         else:
             raise NotImplementedError("Standalone mode not supported for FlexAttention")
 
-        # Reshape for multi-head
+        # Reshape for multi-head (supports GQA)
         query_states = query_states.view(
             batch_size, seq_len, self.num_heads, self.head_dim
         ).transpose(1, 2)
         key_states = key_states.view(
-            batch_size, seq_len, self.num_heads, self.head_dim
+            batch_size, seq_len, self.num_kv_heads, self.head_dim
         ).transpose(1, 2)
         value_states = value_states.view(
-            batch_size, seq_len, self.num_heads, self.head_dim
+            batch_size, seq_len, self.num_kv_heads, self.head_dim
         ).transpose(1, 2)
 
         # Handle KV cache
@@ -292,6 +319,11 @@ class WindowedAttentionCore(nn.Module):
             value_states = torch.cat([past_value, value_states], dim=2)
 
         new_past_key_value = (key_states, value_states) if use_cache else None
+
+        # Expand KV heads to match Q heads for GQA
+        if self.num_kv_groups > 1:
+            key_states = key_states.repeat_interleave(self.num_kv_groups, dim=1)
+            value_states = value_states.repeat_interleave(self.num_kv_groups, dim=1)
 
         # FlexAttention
         attn_output = flex_attention(
