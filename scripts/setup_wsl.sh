@@ -38,7 +38,9 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 
 echo ""
 echo "[3/7] Installing framework dependencies..."
-pip install transformers psutil numpy tqdm
+# Pin transformers to 4.44.2 — BlockFFN's HuggingFace code uses imports
+# removed in transformers 5.x (is_torch_fx_available, _prepare_4d_causal_attention_mask_for_sdpa, etc.)
+pip install "transformers==4.44.2" psutil numpy tqdm
 
 # --- 3. dm-tree (pure pip, the 'import tree' in model code) ---
 echo ""

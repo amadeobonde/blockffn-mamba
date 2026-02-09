@@ -60,7 +60,9 @@ pass "venv created"
 step 2 "Installing PyTorch + CUDA"
 pip install --upgrade pip setuptools wheel -q
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 -q
-pip install transformers psutil numpy tqdm dm-tree -q
+# Pin transformers to 4.44.2 — BlockFFN's HuggingFace code uses imports
+# removed in transformers 5.x (is_torch_fx_available, _prepare_4d_causal_attention_mask_for_sdpa, etc.)
+pip install "transformers==4.44.2" psutil numpy tqdm dm-tree -q
 pass "dependencies installed"
 
 step 3 "Creating kernel stubs"
@@ -147,6 +149,13 @@ step 8 "Loading BlockFFN-3B-SFT"
 if [ -d "$HOME/blockffn-mamba/cache" ]; then
     export HF_HOME="$HOME/blockffn-mamba/cache"
     echo "  Using local cache: $HF_HOME"
+fi
+
+# Clear stale cached model code (may have been downloaded with wrong transformers version)
+CACHED_MODULES="$HF_HOME/modules/transformers_modules/SparseLLM"
+if [ -d "$CACHED_MODULES" ]; then
+    echo "  Clearing stale cached model code..."
+    rm -rf "$CACHED_MODULES"
 fi
 
 python << 'PYEOF' || fail "BlockFFN model loading"
