@@ -146,6 +146,23 @@ class AdaptiveAttentionLayer(nn.Module):
         device = hidden_states.device
 
         # =======================================================
+        # Decode shortcut: skip adaptive logic for single-token steps
+        # =======================================================
+        # During autoregressive decode (seq_len=1), there's nothing to
+        # window — one query token attends to the full KV cache.
+        # Just pass through to the original layer unchanged.
+        if seq_len <= 1:
+            return self.original_layer(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                **kwargs,
+            )
+
+        # =======================================================
         # Step 1: Speculative routing signal prediction
         # =======================================================
         routing_signals = self.routing_predictor.predict_routing(hidden_states)
