@@ -193,7 +193,7 @@ class AdaptiveInferenceEngine:
         if attention_mask is not None:
             attention_mask = attention_mask.to(self.device)
 
-        # Initial forward pass for prompt
+        # Prefill: process the full prompt once
         with torch.no_grad():
             outputs = self.model(
                 input_ids,
@@ -201,32 +201,13 @@ class AdaptiveInferenceEngine:
                 use_cache=True,
             )
             past_key_values = outputs.past_key_values
+            # Use prefill logits for the first generated token
+            logits = outputs.logits[:, -1, :]
 
         generated_tokens = []
 
         # Generate tokens
         for step in range(max_new_tokens):
-            # Get current input (last token only for incremental)
-            if generated_tokens:
-                current_input = torch.tensor(
-                    [[generated_tokens[-1]]],
-                    device=self.device,
-                )
-            else:
-                current_input = input_ids[:, -1:]
-
-            # Forward pass
-            with torch.no_grad():
-                outputs = self.model(
-                    current_input,
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=True,
-                )
-
-            logits = outputs.logits[:, -1, :]
-            past_key_values = outputs.past_key_values
-
             # Scheduled verification
             step_position = len(generated_tokens)
             verification_result = self.verification_scheduler.compute_confidence(
@@ -295,16 +276,30 @@ class AdaptiveInferenceEngine:
             next_token_id = next_token.item()
             generated_tokens.append(next_token_id)
 
-            # Update attention mask
+            # Check for EOS
+            if next_token_id == self.tokenizer.eos_token_id:
+                break
+
+            # Extend attention mask BEFORE next forward pass
             if attention_mask is not None:
                 attention_mask = torch.cat([
                     attention_mask,
                     torch.ones(1, 1, device=self.device, dtype=attention_mask.dtype)
                 ], dim=1)
 
-            # Check for EOS
-            if next_token_id == self.tokenizer.eos_token_id:
-                break
+            # Forward pass: process the newly generated token
+            current_input = torch.tensor(
+                [[next_token_id]], device=self.device,
+            )
+            with torch.no_grad():
+                outputs = self.model(
+                    current_input,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                )
+            logits = outputs.logits[:, -1, :]
+            past_key_values = outputs.past_key_values
 
         # Finalize statistics
         self.stats.wall_time_seconds = time.time() - start_time
