@@ -17,8 +17,9 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-TOTAL_STEPS=12
+TOTAL_STEPS=15
 RESULTS_FILE="test_results.txt"
+BENCHMARK_CSV="benchmark_results.csv"
 
 step() {
     echo ""
@@ -44,6 +45,62 @@ fail() {
 > "$RESULTS_FILE"
 echo "Started: $(date)" >> "$RESULTS_FILE"
 echo ""
+
+# =============================================================================
+# PHASE 0: FIND CACHED BLOCKFFN MODEL
+# =============================================================================
+# Search common HuggingFace cache locations for the BlockFFN model.
+# This avoids re-downloading ~6GB if it's already on the machine.
+
+echo -e "${CYAN}Searching for cached BlockFFN-3B-SFT model...${NC}"
+
+MODEL_FOUND=false
+
+# Search order: project cache, HF default, custom locations
+SEARCH_PATHS=(
+    "$HOME/blockffn-mamba/cache"
+    "${HF_HOME:-}"
+    "$HOME/.cache/huggingface"
+    "${XDG_CACHE_HOME:-$HOME/.cache}/huggingface"
+    "/mnt/c/Users/*/cache/huggingface"
+    "/mnt/d/huggingface"
+    "/mnt/e/huggingface"
+)
+
+for search_path in "${SEARCH_PATHS[@]}"; do
+    # Skip empty paths
+    [ -z "$search_path" ] && continue
+
+    # Expand globs (for /mnt/c/Users/*)
+    for expanded_path in $search_path; do
+        [ -d "$expanded_path" ] || continue
+
+        # Check for model files in HF hub cache structure
+        # HuggingFace stores models under hub/models--{org}--{repo}/
+        MODEL_DIR="$expanded_path/hub/models--SparseLLM--BlockFFN-3B-SFT"
+        if [ -d "$MODEL_DIR" ]; then
+            # Verify it has actual model files (not just metadata)
+            if find "$MODEL_DIR" -name "*.safetensors" -o -name "*.bin" 2>/dev/null | head -1 | grep -q .; then
+                export HF_HOME="$expanded_path"
+                MODEL_FOUND=true
+                echo -e "${GREEN}  Found cached model at: $expanded_path${NC}"
+                echo -e "  Model dir: $MODEL_DIR"
+                # Show model size
+                MODEL_SIZE=$(du -sh "$MODEL_DIR" 2>/dev/null | cut -f1)
+                echo -e "  Cache size: $MODEL_SIZE"
+                break
+            fi
+        fi
+    done
+    $MODEL_FOUND && break
+done
+
+if ! $MODEL_FOUND; then
+    echo -e "${YELLOW}  No cached model found. Will download from HuggingFace (~6GB).${NC}"
+    echo -e "${YELLOW}  Searched: ${SEARCH_PATHS[*]}${NC}"
+    # Default HF_HOME so the CACHED_MODULES cleanup below doesn't fail on unbound var
+    export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+fi
 
 # =============================================================================
 # PHASE 1: ENVIRONMENT SETUP
@@ -141,15 +198,11 @@ python tests/test_with_standard_model.py --device cuda || fail "GPT-2 surrogate 
 pass "GPT-2 tests on CUDA"
 
 # =============================================================================
-# PHASE 3: BLOCKFFN MODEL
+# PHASE 3: BLOCKFFN MODEL TESTS
 # =============================================================================
 
 step 8 "Loading BlockFFN-3B-SFT"
-# Use local cache if available
-if [ -d "$HOME/blockffn-mamba/cache" ]; then
-    export HF_HOME="$HOME/blockffn-mamba/cache"
-    echo "  Using local cache: $HF_HOME"
-fi
+echo "  HF_HOME=$HF_HOME"
 
 # Clear stale cached model code (may have been downloaded with wrong transformers version)
 CACHED_MODULES="$HF_HOME/modules/transformers_modules/SparseLLM"
@@ -214,22 +267,102 @@ python tests/test_escalation_strategies.py --device cuda || fail "escalation str
 pass "escalation strategies"
 
 # =============================================================================
+# PHASE 4: BENCHMARKS
+# =============================================================================
+
+step 13 "Benchmark — balanced preset"
+python scripts/benchmark_harness.py \
+    --device cuda \
+    --presets balanced \
+    --batch-sizes 1 \
+    --context-lengths 128,256,512 \
+    --num-tokens 50 \
+    --warmup-runs 1 \
+    --benchmark-runs 3 \
+    --output "$BENCHMARK_CSV" \
+    || fail "benchmark balanced"
+pass "benchmark balanced"
+
+step 14 "Benchmark — aggressive preset"
+python scripts/benchmark_harness.py \
+    --device cuda \
+    --presets aggressive \
+    --batch-sizes 1 \
+    --context-lengths 128,256,512 \
+    --num-tokens 50 \
+    --warmup-runs 1 \
+    --benchmark-runs 3 \
+    --output "$BENCHMARK_CSV" \
+    --resume benchmark_checkpoint.json \
+    || fail "benchmark aggressive"
+pass "benchmark aggressive"
+
+step 15 "Benchmark — fast preset"
+python scripts/benchmark_harness.py \
+    --device cuda \
+    --presets fast \
+    --batch-sizes 1 \
+    --context-lengths 128,256,512 \
+    --num-tokens 50 \
+    --warmup-runs 1 \
+    --benchmark-runs 3 \
+    --output "$BENCHMARK_CSV" \
+    --resume benchmark_checkpoint.json \
+    || fail "benchmark fast"
+pass "benchmark fast"
+
+# =============================================================================
 # FINAL RESULTS
 # =============================================================================
 
+echo "Finished: $(date)" >> "$RESULTS_FILE"
+
 echo ""
 echo -e "${GREEN}============================================${NC}"
-echo -e "${GREEN}  ALL DONE${NC}"
+echo -e "${GREEN}  ALL 15 STEPS COMPLETE${NC}"
 echo -e "${GREEN}============================================${NC}"
 echo ""
-echo "Results:"
+echo -e "${CYAN}TEST RESULTS:${NC}"
 cat "$RESULTS_FILE"
 echo ""
-echo "Finished: $(date)" >> "$RESULTS_FILE"
-echo -e "${YELLOW}Next: run benchmarks manually:${NC}"
-echo "  source .venv/bin/activate"
-echo "  export HF_HOME=~/blockffn-mamba/cache"
-echo "  python scripts/benchmark_harness.py --device cuda --preset balanced"
-echo "  python scripts/benchmark_harness.py --device cuda --preset aggressive"
-echo "  python scripts/benchmark_harness.py --device cuda --preset fast"
+
+# Print benchmark summary
+if [ -f "$BENCHMARK_CSV" ]; then
+    echo -e "${CYAN}BENCHMARK SUMMARY ($BENCHMARK_CSV):${NC}"
+    echo ""
+    # Print CSV header + data as a readable table
+    python << 'PYEOF'
+import csv
+import sys
+
+try:
+    with open("benchmark_results.csv", "r") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    if not rows:
+        print("  No benchmark results found.")
+        sys.exit(0)
+
+    # Print compact summary
+    print(f"  {'Preset':<14} {'Context':>8} {'TTFT(ms)':>10} {'p50(ms)':>10} {'p95(ms)':>10} {'tok/s':>8} {'Attn Save':>10} {'Esc Rate':>10} {'Peak MB':>10}")
+    print(f"  {'-'*14} {'-'*8} {'-'*10} {'-'*10} {'-'*10} {'-'*8} {'-'*10} {'-'*10} {'-'*10}")
+
+    for row in rows:
+        print(f"  {row.get('preset','?'):<14} "
+              f"{row.get('context_length','?'):>8} "
+              f"{float(row.get('ttft_ms',0)):>10.1f} "
+              f"{float(row.get('p50_token_latency_ms',0)):>10.1f} "
+              f"{float(row.get('p95_token_latency_ms',0)):>10.1f} "
+              f"{float(row.get('tokens_per_second',0)):>8.1f} "
+              f"{float(row.get('theoretical_attention_savings',0))*100:>9.1f}% "
+              f"{float(row.get('overall_escalation_rate',0))*100:>9.1f}% "
+              f"{float(row.get('peak_memory_mb',0)):>10.1f}")
+    print()
+except Exception as e:
+    print(f"  Could not parse benchmark CSV: {e}")
+PYEOF
+fi
+
+echo -e "${GREEN}All tests passed. Benchmark data saved to: $BENCHMARK_CSV${NC}"
 echo ""
