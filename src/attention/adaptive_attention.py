@@ -178,13 +178,16 @@ class AdaptiveAttentionLayer(nn.Module):
         window_sizes = self.window_mapper(sparsity, seq_len)
 
         # =======================================================
-        # Quality guard: floor windows at 7/8 of seq_len so that
-        # windowing never drops more than ~12% of context per layer.
-        # This keeps prefill divergence within cs >= 0.99 even when
-        # 12 wrapped layers compound.  The engine's escalation
-        # mechanism handles more aggressive windowing at decode time.
+        # Quality guard: for short sequences (at or below the
+        # medium-window bucket), full attention is already cheap
+        # and windowing only introduces divergence that compounds
+        # through wrapped layers.  Skip windowing entirely.
+        # For longer sequences, floor at 7/8 of seq_len.
         # =======================================================
-        min_window = max(seq_len * 7 // 8, 1)
+        if seq_len <= self.config.medium_window:
+            min_window = seq_len
+        else:
+            min_window = max(seq_len * 7 // 8, 1)
         window_sizes = torch.clamp(window_sizes, min=min(min_window, seq_len))
 
         # =======================================================
