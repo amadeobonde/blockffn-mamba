@@ -178,6 +178,16 @@ class AdaptiveAttentionLayer(nn.Module):
         window_sizes = self.window_mapper(sparsity, seq_len)
 
         # =======================================================
+        # Quality guard: floor windows at 7/8 of seq_len so that
+        # windowing never drops more than ~12% of context per layer.
+        # This keeps prefill divergence within cs >= 0.99 even when
+        # 12 wrapped layers compound.  The engine's escalation
+        # mechanism handles more aggressive windowing at decode time.
+        # =======================================================
+        min_window = max(seq_len * 7 // 8, 1)
+        window_sizes = torch.clamp(window_sizes, min=min(min_window, seq_len))
+
+        # =======================================================
         # No-op shortcut: if all windows >= seq_len, the adaptive
         # mask equals standard causal. Pass through unchanged to
         # preserve the model's internal attention path (flash/SDPA)
@@ -187,6 +197,25 @@ class AdaptiveAttentionLayer(nn.Module):
             outputs = self.original_layer(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                **kwargs,
+            )
+            if self.collect_statistics:
+                self._collect_stats(sparsity, window_sizes, seq_len)
+            return outputs
+
+        # =======================================================
+        # Flash/SDPA guard: when the model handles masking internally
+        # (attention_mask=None), injecting an explicit mask would
+        # switch the attention code path and cause divergence.
+        # =======================================================
+        if attention_mask is None:
+            outputs = self.original_layer(
+                hidden_states=hidden_states,
+                attention_mask=None,
                 position_ids=position_ids,
                 past_key_value=past_key_value,
                 output_attentions=output_attentions,
